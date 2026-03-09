@@ -30,8 +30,11 @@ services:
     env_file: .env
     depends_on:
       postgres:
-        condition: service_healthy   # só sobe após o postgres estar pronto
-    restart: unless-stopped
+        condition: service_healthy   # só sobe após o postgres estar pronto    volumes:
+      # Docker-outside-of-Docker (DooD):
+      # Permite que o scheduler lance containers de tarefa no host Docker.
+      # O usuário do container precisa ter permissão de leitura/escrita no socket.
+      - /var/run/docker.sock:/var/run/docker.sock    restart: unless-stopped
     init: true                       # usa tini como PID 1 (graceful SIGTERM)
     logging:
       driver: "json-file"

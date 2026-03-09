@@ -4,6 +4,12 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Docker CLI: necessário para ContainerRunner lançar tasks containerizadas.
+# Usa Docker-outside-of-Docker (DooD) via socket montado no compose.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Instala dependências em camada separada para aproveitar o cache do Docker

@@ -5,7 +5,8 @@
 -- PostgreSQL na PRIMEIRA inicialização (via entrypoint-initdb.d).
 --
 -- Tabelas criadas aqui:
---   job_execution_logs  → log de cada execução de job
+--   job_execution_logs    → resumo de cada execução de job
+--   container_task_logs   → linhas individuais emitidas por TaskChannel
 --
 -- Tabelas criadas automaticamente pelo APScheduler:
 --   apscheduler_jobs    → estado persistido dos jobs
@@ -140,3 +141,105 @@ ORDER BY started_at DESC;
 
 COMMENT ON VIEW v_recent_errors IS
     'Erros ocorridos na última hora — base para alertas de monitoramento';
+
+
+-- =============================================================
+-- Tabela: container_task_logs
+-- Linha individual emitida por TaskChannel dentro do container
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS container_task_logs (
+    id          BIGSERIAL    PRIMARY KEY,
+    job_id      VARCHAR(255) NOT NULL,
+    job_name    VARCHAR(500),
+    level       VARCHAR(20)  NOT NULL,   -- INFO | WARNING | ERROR | DEBUG | METRIC | RESULT | RAW
+    message     TEXT         NOT NULL,
+    extra       JSONB,                   -- campos adicionais do evento JSON
+    emitted_at  TIMESTAMPTZ,             -- timestamp do relógio do container
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE  container_task_logs             IS 'Linhas individuais emitidas por TaskChannel dentro de containers de tarefa';
+COMMENT ON COLUMN container_task_logs.level       IS 'Nível do evento: INFO | WARNING | ERROR | DEBUG | METRIC | RESULT | RAW';
+COMMENT ON COLUMN container_task_logs.extra       IS 'Campos extras do evento JSON (ex: records, latency_ms, metric_name)';
+COMMENT ON COLUMN container_task_logs.emitted_at  IS 'Timestamp do relógio interno do container (pode divergir levemente do created_at)';
+
+
+-- ── Índices de container_task_logs ─────────────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_ctl_job_id
+    ON container_task_logs (job_id);
+
+CREATE INDEX IF NOT EXISTS idx_ctl_level
+    ON container_task_logs (level);
+
+CREATE INDEX IF NOT EXISTS idx_ctl_emitted_at
+    ON container_task_logs (emitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_ctl_job_level
+    ON container_task_logs (job_id, level);
+
+-- Índice GIN para consultas JSONB em 'extra' (ex: extra @> '{"status":"error"}')
+CREATE INDEX IF NOT EXISTS idx_ctl_extra_gin
+    ON container_task_logs USING gin (extra);
+
+
+-- ── View: logs de containers por execução ────────────────────────────────────
+
+CREATE OR REPLACE VIEW v_container_executions AS
+SELECT
+    ctl.job_id,
+    ctl.job_name,
+    -- Agrupa as mensagens de uma execução (mesma janela de 1 min)
+    DATE_TRUNC('minute', ctl.emitted_at)          AS execution_window,
+    COUNT(*)                                       AS total_lines,
+    COUNT(*) FILTER (WHERE ctl.level = 'ERROR')    AS error_lines,
+    COUNT(*) FILTER (WHERE ctl.level = 'WARNING')  AS warning_lines,
+    COUNT(*) FILTER (WHERE ctl.level = 'METRIC')   AS metric_lines,
+    MAX(CASE WHEN ctl.level = 'RESULT'
+             THEN ctl.extra->>'status' END)        AS result_status,
+    MIN(ctl.emitted_at)                            AS first_event,
+    MAX(ctl.emitted_at)                            AS last_event
+FROM container_task_logs ctl
+GROUP BY ctl.job_id, ctl.job_name, DATE_TRUNC('minute', ctl.emitted_at)
+ORDER BY last_event DESC;
+
+COMMENT ON VIEW v_container_executions IS
+    'Resumo agrupado de eventos por execução de container (janela de 1 minuto)';
+
+
+-- ── View: métricas emitidas pelos containers ─────────────────────────────
+
+CREATE OR REPLACE VIEW v_container_metrics AS
+SELECT
+    job_id,
+    job_name,
+    extra->>'metric_name'        AS metric_name,
+    (extra->>'value')::NUMERIC   AS value,
+    emitted_at
+FROM container_task_logs
+WHERE level = 'METRIC'
+  AND extra IS NOT NULL
+ORDER BY emitted_at DESC;
+
+COMMENT ON VIEW v_container_metrics IS
+    'Métricas emitidas via ch.metric() dentro de containers de tarefa';
+
+
+-- ── View: erros recentes de containers (1 hora) ─────────────────────
+
+CREATE OR REPLACE VIEW v_container_recent_errors AS
+SELECT
+    id,
+    job_id,
+    job_name,
+    message,
+    extra,
+    emitted_at
+FROM container_task_logs
+WHERE level = 'ERROR'
+  AND emitted_at >= NOW() - INTERVAL '1 hour'
+ORDER BY emitted_at DESC;
+
+COMMENT ON VIEW v_container_recent_errors IS
+    'Erros de containers ocorridos na última hora';

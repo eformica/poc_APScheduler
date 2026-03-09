@@ -1,19 +1,31 @@
 """
 Registro central de jobs — ÚNICO lugar onde novos jobs são definidos.
 
-Como adicionar um novo job:
-  1. Implemente a tarefa em tasks/<dominio>.py herdando de BaseTask.
-  2. Instancie a classe de tarefa em _build_job_list().
-  3. Adicione um JobConfig à lista com o trigger desejado.
+Dois tipos de jobs suportados:
 
-Triggers disponíveis:
-  IntervalTrigger(seconds=N, minutes=N, hours=N)  → repetição periódica
-  CronTrigger(hour=H, minute=M, day_of_week='mon-fri')  → horário fixo
-  DateTrigger(run_date=datetime(...))  → execução única
+  1. JobConfig (in-process)
+     ─ Task executada na thread pool do próprio scheduler.
+     ─ Envolva a função com make_logged_callable() para persistência automática.
+     ─ Ideal para tarefas leves, rápidas e que não precisam de isolamento.
 
-Nota sobre os intervalos neste arquivo:
-  Os valores atuais usam SEGUNDOS para facilitar a visualização durante
-  desenvolvimento. Os valores de PRODUÇÃO estão comentados ao lado de cada job.
+  2. ContainerJobConfig (containerizado)
+     ─ Task executada em um container Docker isolado.
+     ─ Use make_container_callable() ou register_container_jobs().
+     ─ NÃO use make_logged_callable() — o ContainerRunner já persiste tudo.
+     ─ Ideal para tarefas pesadas, com dependências próprias ou que exigem
+       isolamento de processo, memória e sistema de arquivos.
+
+Como adicionar um novo job in-process:
+  1. Implemente o método em tasks/<dominio>.py herdando de BaseTask.
+  2. Instancie a classe em _build_job_list() e adicione um JobConfig.
+
+Como adicionar um novo job containerizado:
+  1. Crie o entrypoint da task (como tasks/containerized_example.py).
+  2. Construa e publique a imagem Docker.
+  3. Adicione um ContainerJobConfig em _build_container_job_list().
+
+Nota sobre intervalos: valores atuais usam SEGUNDOS para demo.
+Os valores de PRODUÇÃO estão comentados ao lado de cada job.
 """
 
 from dataclasses import dataclass
@@ -23,6 +35,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from container_runner.config import ContainerJobConfig, register_container_jobs
 from listeners.execution_logger import make_logged_callable
 from tasks.analytics import AnalyticsTask
 from tasks.devops import DevOpsTask
@@ -114,20 +127,73 @@ def _build_job_list() -> list[JobConfig]:
     ]
 
 
+# ── Jobs containerizados ───────────────────────────────────────────────────────
+
+def _build_container_job_list() -> list[ContainerJobConfig]:
+    """
+    Retorna a lista de jobs que rodam em containers Docker isolados.
+
+    Cada job lança um container separado via ContainerRunner.
+    O container deve emitir eventos JSON via TaskChannel (channel.py).
+
+    Descomente e adapte os exemplos abaixo para ativar jobs containerizados.
+    Substitua 'myorg/...:latest' pelas imagens reais do seu registry.
+    """
+    return [
+        # ── Exemplo: ETL containerizado ───────────────────────────────────
+        # Container com ambiente Python + dependências próprias (pandas, etc.)
+        # ContainerJobConfig(
+        #     id="etl_containerizado",
+        #     name="ETL: Pipeline Containerizado",
+        #     image="myorg/etl-task:latest",
+        #     trigger=IntervalTrigger(minutes=30),    # prod: minutes=30
+        #     env_vars={
+        #         "BATCH_SIZE": "500",
+        #         "SOURCE_DB": "postgresql://user:pass@db-source/analytics",
+        #     },
+        #     timeout=300,
+        # ),
+
+        # ── Exemplo: Relatório em R/Julia com dependências específicas ─────
+        # ContainerJobConfig(
+        #     id="relatorio_r",
+        #     name="Analytics: Relatório Estatístico (R)",
+        #     image="myorg/r-reports:latest",
+        #     trigger=CronTrigger(hour=7, minute=0),  # prod: todo dia 07:00
+        #     command=["Rscript", "/app/report.R"],
+        #     timeout=600,
+        # ),
+
+        # ── Exemplo: Task de ML com GPU ────────────────────────────────────
+        # ContainerJobConfig(
+        #     id="treinamento_modelo",
+        #     name="ML: Re-treino Incremental",
+        #     image="myorg/ml-trainer:latest",
+        #     trigger=CronTrigger(day_of_week="sun", hour=2),
+        #     env_vars={"MODEL_VERSION": "v3", "EPOCHS": "10"},
+        #     timeout=3600,
+        # ),
+    ]
+
+
 def register_jobs(scheduler: BlockingScheduler) -> int:
     """
-    Envolve cada job com o logger de execução e o registra no scheduler.
+    Registra todos os jobs in-process e containerizados no scheduler.
 
-    O wrapper make_logged_callable() garante que início, fim, duração
-    e traceback de cada execução sejam persistidos no PostgreSQL.
+    Jobs in-process:
+      Envolvidos com make_logged_callable() → persistência automática.
 
-    Retorna o total de jobs registrados.
+    Jobs containerizados:
+      Usam make_container_callable() via register_container_jobs()
+      → ContainerRunner gerencia persistência (container_task_logs + job_execution_logs).
+
+    Retorna o total de jobs registrados (in-process + containerizados).
     """
-    job_list = _build_job_list()
+    # ── In-process ─────────────────────────────────────────────────────────
+    in_process_list = _build_job_list()
 
-    for jc in job_list:
+    for jc in in_process_list:
         scheduler.add_job(
-            # Envolve o callable com logging automático para o banco
             make_logged_callable(jc.func, jc.id, jc.name),
             trigger=jc.trigger,
             id=jc.id,
@@ -135,7 +201,11 @@ def register_jobs(scheduler: BlockingScheduler) -> int:
             max_instances=jc.max_instances,
             coalesce=jc.coalesce,
             misfire_grace_time=jc.misfire_grace_time,
-            replace_existing=True,   # idempotente: sem DuplicateJobError no restart
+            replace_existing=True,
         )
 
-    return len(job_list)
+    # ── Containerizados ────────────────────────────────────────────────────
+    container_list = _build_container_job_list()
+    register_container_jobs(scheduler, container_list)
+
+    return len(in_process_list) + len(container_list)
