@@ -1,39 +1,78 @@
 # POC APScheduler — Agendador de Tarefas
 
-Prova de conceito do [APScheduler 3.x](https://apscheduler.readthedocs.io/) com exemplos práticos e comentados de múltiplos casos de uso.
+Prova de conceito do [APScheduler 3.x](https://apscheduler.readthedocs.io/) em dois níveis:
+
+- **`examples/`** — exemplos didáticos e interativos dos triggers e APIs do APScheduler
+- **`framework/`** — implementação production-ready com Docker, PostgreSQL, tarefas in-process e tarefas containerizadas
+
+---
 
 ## Estrutura do projeto
 
 ```
 poc_APScheduler/
-├── main.py                      # Menu interativo (ponto de entrada)
+│
+├── main.py                            # Menu interativo (ponto de entrada dos exemplos)
 ├── pyproject.toml
-├── examples/
-│   ├── interval_trigger.py      # Exemplo 1 — Intervalos regulares
-│   ├── cron_trigger.py          # Exemplo 2 — Horários fixos (cron)
-│   ├── date_trigger.py          # Exemplo 3 — Execução única
-│   ├── job_management.py        # Exemplo 4 — Gerenciar jobs dinamicamente
-│   ├── real_world_cases.py      # Exemplo 5 — Casos reais (5 domínios)
-│   └── persistent_jobs.py       # Exemplo 6 — Persistência SQLite
+│
+├── examples/                          # Exemplos didáticos autocontidos
+│   ├── interval_trigger.py            # 1 — IntervalTrigger
+│   ├── cron_trigger.py                # 2 — CronTrigger
+│   ├── date_trigger.py                # 3 — DateTrigger (execução única)
+│   ├── job_management.py              # 4 — Gerenciamento dinâmico de jobs
+│   ├── real_world_cases.py            # 5 — Casos reais: 5 domínios, 19 jobs
+│   └── persistent_jobs.py             # 6 — Persistência SQLite + event listeners
+│
+└── framework/                         # Framework production-ready
+    ├── Dockerfile
+    ├── docker-compose.yml
+    ├── requirements.txt
+    ├── .env / .env.example
+    │
+    ├── scheduler/                     # Núcleo do agendador
+    │   ├── app.py                     # Entrypoint: boot, retry DB, SIGTERM handler
+    │   ├── config.py                  # Settings via pydantic-settings + .env
+    │   ├── engine.py                  # Fábrica do BlockingScheduler
+    │   └── registry.py                # Registro central de todos os jobs
+    │
+    ├── db/                            # Camada de dados
+    │   ├── models.py                  # ORM: JobExecutionLog, ContainerTaskLog
+    │   ├── session.py                 # Engine + SessionLocal (thread-safe)
+    │   └── init.sql                   # Esquema, índices e views analíticas
+    │
+    ├── listeners/
+    │   └── execution_logger.py        # make_logged_callable() + misfire listener
+    │
+    ├── container_runner/              # Módulo de tasks containerizadas
+    │   ├── channel.py                 # TaskChannel — usado DENTRO do container
+    │   ├── runner.py                  # ContainerRunner — usado pelo orquestrador
+    │   └── config.py                  # ContainerJobConfig + make_container_callable
+    │
+    └── tasks/                         # Implementações de tarefas
+        ├── base.py                    # BaseTask (ABC com logger pré-configurado)
+        ├── ecommerce.py               # EcommerceTask
+        ├── analytics.py               # AnalyticsTask
+        ├── devops.py                  # DevOpsTask
+        └── containerized_example.py   # Exemplo de task containerizada
 ```
 
-## Instalação
+---
+
+## Exemplos didáticos (`examples/`)
+
+### Instalação
 
 ```bash
 uv sync
-# ou
-pip install apscheduler sqlalchemy
 ```
 
-## Execução
+### Execução
 
 ```bash
 uv run python main.py
-# ou
-python main.py
 ```
 
-## Exemplos disponíveis
+### Exemplos disponíveis
 
 | # | Trigger / Tópico | O que demonstra |
 |---|---|---|
@@ -44,32 +83,40 @@ python main.py
 | 5 | Casos reais | E-commerce, Analytics/ETL, DevOps, Financeiro, Conteúdo |
 | 6 | Persistência | `SQLAlchemyJobStore` + SQLite, restart recovery, event listeners |
 
-## Conceitos cobertos
+---
+
+## Framework production-ready (`framework/`)
+
+> Ver [framework/README.md](framework/README.md) para documentação completa.
+
+### Início rápido
+
+```bash
+cd framework
+cp .env.example .env       # ajuste credenciais se necessário
+docker-compose up --build
+```
+
+### Dois tipos de jobs
+
+| Tipo | Onde roda | Persistência | Quando usar |
+|---|---|---|---|
+| **In-process** (`JobConfig`) | Thread pool do scheduler | `job_execution_logs` | Tarefas leves, rápidas, sem dependências extras |
+| **Containerizado** (`ContainerJobConfig`) | Container Docker isolado | `job_execution_logs` + `container_task_logs` | Tarefas pesadas, dependências próprias, isolamento total |
+
+---
+
+## Referência rápida de APScheduler
 
 ### Triggers
 
 | Trigger | Uso | Exemplo |
 |---|---|---|
-| `IntervalTrigger` | Repetir a cada N unidades de tempo | Monitor de API a cada 30 s |
-| `CronTrigger` | Horário fixo estilo cron Unix | Backup toda meia-noite |
-| `DateTrigger` | Uma única execução em datetime específico | Publicação agendada |
+| `IntervalTrigger` | Repetir a cada N unidades | `IntervalTrigger(minutes=30, jitter=60)` |
+| `CronTrigger` | Horário fixo estilo cron | `CronTrigger(day_of_week='mon-fri', hour=8)` |
+| `DateTrigger` | Execução única | `DateTrigger(run_date=datetime(2026, 12, 31, 23, 59))` |
 
-### Schedulers
-
-- **`BackgroundScheduler`** — roda em thread separada, não bloqueia o processo principal
-- **`BlockingScheduler`** — bloqueia o processo (ideal para scripts dedicados ao agendador)
-
-### Job Stores
-
-- **`MemoryJobStore`** — padrão, não persiste (perde tudo no restart)
-- **`SQLAlchemyJobStore`** — persiste em SQLite / PostgreSQL / MySQL / Oracle
-
-### Executors
-
-- **`ThreadPoolExecutor`** — tarefas I/O-bound (chamadas HTTP, banco de dados, arquivos)
-- **`ProcessPoolExecutor`** — tarefas CPU-intensive (processamento, compressão, criptografia)
-
-### Parâmetros úteis
+### `add_job` — parâmetros essenciais
 
 ```python
 scheduler.add_job(
@@ -77,18 +124,18 @@ scheduler.add_job(
     trigger=IntervalTrigger(seconds=30, jitter=5),
     id="meu_job",
     name="Descrição do Job",
-    max_instances=1,        # evita execuções sobrepostas
-    misfire_grace_time=10,  # tolera até 10 s de atraso
-    coalesce=True,          # se atrasou, executa só uma vez (não todas)
-    replace_existing=True,  # substitui job se o mesmo ID já existir
+    max_instances=1,         # evita execuções sobrepostas
+    misfire_grace_time=30,   # tolera até 30 s de atraso
+    coalesce=True,           # se atrasou, executa só uma vez
+    replace_existing=True,   # substitui se o ID já existir
 )
 ```
 
 ### Gerenciamento dinâmico
 
 ```python
-scheduler.pause_job("meu_job")              # pausa (não perde schedule)
-scheduler.resume_job("meu_job")             # retoma
+scheduler.pause_job("meu_job")
+scheduler.resume_job("meu_job")
 scheduler.reschedule_job("meu_job", trigger=IntervalTrigger(minutes=1))
 scheduler.modify_job("meu_job", kwargs={"param": "novo_valor"})
 scheduler.remove_job("meu_job")
@@ -98,7 +145,7 @@ scheduler.remove_all_jobs()
 ### Event Listeners
 
 ```python
-from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 def meu_listener(event):
     if event.exception:
@@ -106,5 +153,29 @@ def meu_listener(event):
     else:
         print(f"Job {event.job_id} concluído")
 
-scheduler.add_listener(meu_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+scheduler.add_listener(meu_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)
 ```
+
+### Schedulers
+
+| Classe | Comportamento | Uso típico |
+|---|---|---|
+| `BackgroundScheduler` | Thread separada, não bloqueia | Aplicações web, scripts com outras tarefas |
+| `BlockingScheduler` | Bloqueia a thread principal | Container/processo dedicado ao agendador |
+
+### Job Stores
+
+| Store | Persistência | Uso |
+|---|---|---|
+| `MemoryJobStore` | ✗ Perde no restart | Desenvolvimento, testes |
+| `SQLAlchemyJobStore` | ✔ SQLite / PostgreSQL / MySQL | Produção |
+| `MongoDBJobStore` | ✔ MongoDB | Ambientes com Mongo |
+| `RedisJobStore` | ✔ Redis | Alta performance |
+
+### Executors
+
+| Executor | Ideal para |
+|---|---|
+| `ThreadPoolExecutor` | Tarefas I/O-bound (HTTP, DB, arquivos) |
+| `ProcessPoolExecutor` | Tarefas CPU-intensive (compressão, ML, criptografia) |
+| `AsyncIOExecutor` | Coroutines `async def` |
