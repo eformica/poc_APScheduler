@@ -87,11 +87,13 @@ def make_container_callable(cfg: ContainerJobConfig) -> Callable[[], None]:
     from container_runner.runner import ContainerRunner
 
     def _run_in_container(**job_kwargs: Any) -> None:
-        # Monta env_vars: começa com os env_vars estáticos do config.
-        # Se job_kwargs foram passados (via APScheduler kwargs), serializa como
-        # JOB_KWARGS JSON — lido dentro do container via TaskChannel.kwargs.
+        # cfg.job_kwargs = valores PADRÃO definidos em ContainerJobConfig (estáticos).
+        # job_kwargs     = parâmetros DINÂMICOS passados pelo APScheduler em cada
+        #                  execução (vem de add_job(kwargs=...) — definidos via
+        #                  POST /jobs ou modificados via modify_job).
+        # Dinâmicos sobrescrevem padrões: {**padrões, **overrides}.
         env = dict(cfg.env_vars)
-        merged_kwargs = {**cfg.job_kwargs, **job_kwargs}  # job_kwargs tem precedência
+        merged_kwargs = {**cfg.job_kwargs, **job_kwargs}  # dinâmicos têm precedência
         if merged_kwargs:
             env["JOB_KWARGS"] = json.dumps(merged_kwargs, default=str)
         runner = ContainerRunner(

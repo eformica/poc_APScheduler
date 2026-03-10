@@ -429,11 +429,28 @@ Os kwargs são **persistidos no job store** (PostgreSQL) junto com o trigger, po
 
 ### Precedência de kwargs em jobs containerizados
 
-Quando um `ContainerJobConfig` define `job_kwargs` estaticamente **e** a API cria uma instância com `job_kwargs` dinâmicos, os kwargs do APScheduler têm precedência:
+`cfg.job_kwargs` (definido no `ContainerJobConfig`) funciona como **valor padrão**. Kwargs passados via `POST /jobs` são os **dinâmicos** e **sobrescrevem** os padrões em caso de chave duplicada:
 
 ```python
-# Resultado final passado ao container:
-# merged = {**cfg.job_kwargs, **kwargs_do_apscheduler}
+# Resultado final injetado no container como JOB_KWARGS:
+# merged = {**cfg.job_kwargs, **body.job_kwargs}   ← dinâmicos ganham
+```
+
+Exemplo concreto:
+
+```python
+# ContainerJobConfig estático em registry.py:
+ContainerJobConfig(
+    id="etl_pipeline",
+    job_kwargs={"batch_size": 100, "mode": "incremental"},  # padrões
+)
+
+# POST /jobs via API com job_kwargs dinâmicos:
+# {"func_key": "etl_pipeline", "job_kwargs": {"batch_size": 500}}
+
+# merged final enviado ao container:
+# {"batch_size": 500, "mode": "incremental"}
+#   ^^ sobrescrito      ^^ padrão mantido (não estava no body)
 ```
 
 ---
