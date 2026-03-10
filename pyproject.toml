@@ -8,3 +8,8 @@ dependencies = [
     "apscheduler>=3.10,<4.0",
     "sqlalchemy>=2.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pyyaml>=6.0.3",
+]

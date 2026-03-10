@@ -12,7 +12,7 @@ Tabelas gerenciadas pelo APScheduler:
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -135,3 +135,46 @@ class ContainerTaskLog(Base):
             f"<ContainerTaskLog id={self.id} job_id={self.job_id!r} "
             f"level={self.level!r} msg={self.message[:40]!r}>"
         )
+
+
+class User(Base):
+    """
+    Usuário da API REST.
+
+    Campos:
+      username         → identificador de login único
+      email            → e-mail único (obrigatório)
+      hashed_password  → hash bcrypt da senha
+      role             → 'admin' | 'operator' | 'viewer'
+      is_active        → False desativa o login sem excluir o registro
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    username: Mapped[str] = mapped_column(
+        String(50), unique=True, nullable=False, index=True
+    )
+    email: Mapped[str] = mapped_column(
+        String(255), unique=True, nullable=False
+    )
+    hashed_password: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    role: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="operator"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id} username={self.username!r} role={self.role!r}>"

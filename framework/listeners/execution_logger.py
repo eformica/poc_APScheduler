@@ -159,6 +159,30 @@ def _on_job_missed(event: JobExecutionEvent) -> None:
 
 
 def register_listeners(scheduler: Any) -> None:
-    """Registra os event listeners de execução perdida no scheduler."""
+    """Registra os event listeners no scheduler."""
+    from apscheduler.events import EVENT_JOB_EXECUTED
+
+    def _on_job_executed_api_only(event: JobExecutionEvent) -> None:
+        """
+        Re-pausa jobs API-only após cada execução manual.
+
+        Fluxo:
+          1. POST /jobs/{id}/run → modify_job(next_run_time=now)
+          2. Job executa
+          3. APScheduler recalcula next_run_time via _API_ONLY_TRIGGER (~100 anos)
+          4. Este listener detecta o job em API_ONLY_JOB_IDS e re-pausa
+             → next_run_time volta a None (aparece como null na API)
+        """
+        from scheduler.registry import API_ONLY_JOB_IDS
+        if event.job_id in API_ONLY_JOB_IDS:
+            try:
+                scheduler.pause_job(event.job_id)
+            except Exception as exc:
+                logger.debug(
+                    "[execution_logger] falha ao re-pausar job api-only '%s': %s",
+                    event.job_id, exc,
+                )
+
     scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
-    logger.info("✅ Event listeners registrados (misfire → PostgreSQL)")
+    scheduler.add_listener(_on_job_executed_api_only, EVENT_JOB_EXECUTED)
+    logger.info("✅ Event listeners registrados (misfire + api-only re-pause → PostgreSQL)")

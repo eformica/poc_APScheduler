@@ -32,6 +32,7 @@ Nota: NÃO envolva o callable com make_logged_callable().
 O ContainerRunner já persiste em job_execution_logs E container_task_logs.
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -49,14 +50,16 @@ class ContainerJobConfig:
         network        → rede Docker ('host' | 'bridge' | nome customizado)
 
     Campos de scheduling (mesmo contrato de JobConfig):
-        id, name, trigger, max_instances, coalesce, misfire_grace_time
+        id, name, trigger, max_instances, coalesce, misfire_grace_time, job_kwargs
+
+    job_kwargs é serializado como JSON e injetado como variável de ambiente JOB_KWARGS
+    no container. Leia dentro do container com: TaskChannel.from_env().kwargs
     """
 
     id: str
     name: str
     image: str
-    trigger: Any
-
+    trigger: Optional[Any]             = None   # None → acionamento exclusivo via API REST
     command: Optional[list[str]]       = None
     env_vars: dict[str, str]           = field(default_factory=dict)
     timeout: int                       = 300
@@ -64,6 +67,8 @@ class ContainerJobConfig:
     max_instances: int                 = 1
     coalesce: bool                     = True
     misfire_grace_time: int            = 60
+    in_catalog: bool                   = True   # False → oculto no GET /jobs/catalog
+    job_kwargs: dict[str, Any]         = field(default_factory=dict)  # injetado como JOB_KWARGS env var (JSON)
 
 
 def make_container_callable(cfg: ContainerJobConfig) -> Callable[[], None]:
@@ -81,13 +86,20 @@ def make_container_callable(cfg: ContainerJobConfig) -> Callable[[], None]:
     """
     from container_runner.runner import ContainerRunner
 
-    def _run_in_container() -> None:
+    def _run_in_container(**job_kwargs: Any) -> None:
+        # Monta env_vars: começa com os env_vars estáticos do config.
+        # Se job_kwargs foram passados (via APScheduler kwargs), serializa como
+        # JOB_KWARGS JSON — lido dentro do container via TaskChannel.kwargs.
+        env = dict(cfg.env_vars)
+        merged_kwargs = {**cfg.job_kwargs, **job_kwargs}  # job_kwargs tem precedência
+        if merged_kwargs:
+            env["JOB_KWARGS"] = json.dumps(merged_kwargs, default=str)
         runner = ContainerRunner(
             job_id=cfg.id,
             job_name=cfg.name,
             image=cfg.image,
             command=cfg.command,
-            env_vars=cfg.env_vars,
+            env_vars=env,
             timeout=cfg.timeout,
             network=cfg.network,
         )
@@ -101,6 +113,10 @@ def make_container_callable(cfg: ContainerJobConfig) -> Callable[[], None]:
     # Preserva identidade para logs do APScheduler
     _run_in_container.__name__     = cfg.id
     _run_in_container.__qualname__ = f"container_job.{cfg.id}"
+    # Sentinel: permite que chamadores (ex: create_job na API) detectem que este
+    # callable já cuida da própria persistência via ContainerRunner —
+    # NÃO deve ser envolvido com make_logged_callable().
+    _run_in_container._is_container_callable = True  # type: ignore[attr-defined]
     return _run_in_container
 
 
@@ -111,20 +127,29 @@ def register_container_jobs(
     """
     Registra uma lista de ContainerJobConfig no scheduler.
 
-    Equivalente a register_jobs() do scheduler/registry.py,
-    mas para jobs containerizados.
+    cfg.trigger is not None  → job com agendamento automático.
+    cfg.trigger is None      → job pausado (next_run_time=None),
+                               acionado somente via POST /jobs/{id}/run.
 
     Retorna o total de jobs registrados.
     """
+    from apscheduler.triggers.interval import IntervalTrigger
+    _sentinel = IntervalTrigger(days=36500)
+
     for cfg in configs:
-        scheduler.add_job(
-            make_container_callable(cfg),
-            trigger=cfg.trigger,
+        add_kwargs: dict = dict(
             id=cfg.id,
             name=cfg.name,
             max_instances=cfg.max_instances,
             coalesce=cfg.coalesce,
             misfire_grace_time=cfg.misfire_grace_time,
             replace_existing=True,
+            kwargs=cfg.job_kwargs,  # APScheduler passa como **kwargs ao callable
         )
+        if cfg.trigger is None:
+            add_kwargs["trigger"] = _sentinel
+            add_kwargs["next_run_time"] = None  # começa pausado
+        else:
+            add_kwargs["trigger"] = cfg.trigger
+        scheduler.add_job(make_container_callable(cfg), **add_kwargs)
     return len(configs)

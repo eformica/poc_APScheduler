@@ -1,6 +1,6 @@
-services:
+﻿services:
 
-  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  # -- PostgreSQL ------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: scheduler_postgres
@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scheduler_pass}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # init.sql roda automaticamente na 1ª inicialização do container
+      # init.sql roda automaticamente na 1a inicializacao do container
       - ./db/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     ports:
       - "5432:5432"
@@ -21,21 +21,24 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # ── Scheduler ──────────────────────────────────────────────────────────────
+  # -- Scheduler (FastAPI + APScheduler) ------------------------------------
   scheduler:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: scheduler_app
     env_file: .env
+    ports:
+      - "8000:8000"
     depends_on:
       postgres:
-        condition: service_healthy   # só sobe após o postgres estar pronto    volumes:
+        condition: service_healthy
+    volumes:
       # Docker-outside-of-Docker (DooD):
       # Permite que o scheduler lance containers de tarefa no host Docker.
-      # O usuário do container precisa ter permissão de leitura/escrita no socket.
-      - /var/run/docker.sock:/var/run/docker.sock    restart: unless-stopped
-    init: true                       # usa tini como PID 1 (graceful SIGTERM)
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    init: true
     logging:
       driver: "json-file"
       options:

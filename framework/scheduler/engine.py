@@ -1,9 +1,9 @@
 """
-Fábrica do BlockingScheduler com PostgreSQL como job store.
+Fábrica do BackgroundScheduler com PostgreSQL como job store.
 
 Decisões de design:
-  - BlockingScheduler: o container Docker É o processo do scheduler,
-    por isso bloqueamos a thread principal em vez de usar Background.
+  - BackgroundScheduler: roda em thread separada, liberando a thread principal
+    para o uvicorn/FastAPI servir a API REST.
   - SQLAlchemyJobStore (PostgreSQL): jobs persistidos sobrevivem a restarts.
   - ThreadPoolExecutor: ideal para tarefas I/O-bound (HTTP, DB, filesystem).
   - coalesce=True: se o scheduler ficou offline e voltou, executa cada job
@@ -13,13 +13,13 @@ Decisões de design:
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from scheduler.config import settings
 
 
-def create_scheduler() -> BlockingScheduler:
-    """Cria e retorna o BlockingScheduler configurado para produção."""
+def create_scheduler() -> BackgroundScheduler:
+    """Cria e retorna o BackgroundScheduler configurado para produção."""
 
     jobstores = {
         # Todos os jobs persistidos no PostgreSQL.
@@ -44,7 +44,7 @@ def create_scheduler() -> BlockingScheduler:
         "misfire_grace_time": 60,   # tolera até 60s de atraso
     }
 
-    return BlockingScheduler(
+    return BackgroundScheduler(
         jobstores=jobstores,
         executors=executors,
         job_defaults=job_defaults,

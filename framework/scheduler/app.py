@@ -1,15 +1,19 @@
 """
-Ponto de entrada do scheduler.
+Ponto de entrada do scheduler (invocado por `python -m scheduler.app`).
 
 Fluxo de inicialização:
   1. Configura logging estruturado para stdout (capturado pelo Docker)
-  2. Aguarda o PostgreSQL ficar disponível (retry com backoff)
-  3. Garante que as tabelas de log existem (create_all idempotente)
-  4. Cria o BlockingScheduler com PostgreSQL job store
+  2. Inicia uvicorn apontando para api.main:app
+
+O lifespan do FastAPI (api/main.py) executa na ordem:
+  1. Aguarda o PostgreSQL ficar disponível (retry com backoff)
+  2. Garante que as tabelas de log existem (create_all idempotente)
+  3. Cria o usuário admin padrão se não existir
+  4. Cria o BackgroundScheduler com PostgreSQL job store
   5. Registra os event listeners (execuções perdidas → DB)
   6. Registra todos os jobs definidos em registry.py
-  7. Configura handlers de SIGTERM/SIGINT para graceful shutdown
-  8. Inicia o scheduler (bloqueia até shutdown)
+  7. Inicia o scheduler em background (não bloqueia o uvicorn)
+  8. No shutdown: scheduler.shutdown(wait=True)
 
 Execução:
   docker-compose up --build
@@ -17,7 +21,6 @@ Execução:
 """
 
 import logging
-import signal
 import sys
 import time
 
@@ -74,53 +77,63 @@ def ensure_tables() -> None:
     logger.info("✅ Tabelas de log verificadas/criadas")
 
 
+# ── Criação do usuário admin padrão ─────────────────────────────────────────
+
+def _create_admin_user() -> None:
+    """
+    Cria o usuário 'admin' padrão se não existir nenhum usuário com role admin.
+    Chamado pelo lifespan da API antes de iniciar o scheduler.
+    """
+    from db.models import User
+    from db.session import SessionLocal
+    from api.auth import hash_password
+
+    db = SessionLocal()
+    try:
+        if not db.query(User).filter(User.role == "admin").first():
+            admin = User(
+                username="admin",
+                email="admin@scheduler.local",
+                hashed_password=hash_password(settings.ADMIN_DEFAULT_PASSWORD),
+                role="admin",
+            )
+            db.add(admin)
+            db.commit()
+            if settings.ADMIN_DEFAULT_PASSWORD == "admin123":
+                logger.warning(
+                    "⚠️  Usuário admin criado com senha padrão 'admin123'. "
+                    "Altere via PUT /users/{id} antes de ir para produção!"
+                )
+            else:
+                logger.info("✅ Usuário admin criado")
+    except Exception as exc:
+        logger.error("❌ Erro ao criar usuário admin: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    """Inicia o servidor FastAPI+uvicorn (API REST + BackgroundScheduler integrado)."""
+    import uvicorn
+
     logger.info("=" * 60)
-    logger.info("  APScheduler Framework — iniciando")
-    logger.info(f"  PostgreSQL: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}")
-    logger.info(f"  Timezone  : {settings.SCHEDULER_TIMEZONE}")
-    logger.info(f"  Workers   : {settings.SCHEDULER_THREAD_POOL_SIZE}")
-    logger.info("=" * 60)
-
-    # 1. Aguarda o banco
-    wait_for_db()
-
-    # 2. Garante as tabelas de log
-    ensure_tables()
-
-    # 3. Cria o scheduler
-    from scheduler.engine import create_scheduler
-    scheduler = create_scheduler()
-
-    # 4. Registra event listeners (execuções perdidas → DB)
-    from listeners.execution_logger import register_listeners
-    register_listeners(scheduler)
-
-    # 5. Registra todos os jobs
-    from scheduler.registry import register_jobs
-    total = register_jobs(scheduler)
-
-    # 6. Graceful shutdown — Docker envia SIGTERM antes de SIGKILL
-    def handle_shutdown(signum: int, frame: object) -> None:
-        sig_name = signal.Signals(signum).name
-        logger.info(f"🛑 Sinal {sig_name} recebido — aguardando jobs em execução...")
-        scheduler.shutdown(wait=True)
-        logger.info("👋 Scheduler encerrado com sucesso.")
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
-
-    # 7. Log dos jobs registrados
-    logger.info(f"🚀 {total} jobs registrados:")
-    for job in scheduler.get_jobs():
-        logger.info(f"   • [{job.id}]  próxima: {job.next_run_time}")
+    logger.info("  APScheduler Framework — API REST")
+    logger.info("  PostgreSQL : %s:%s/%s", settings.POSTGRES_HOST, settings.POSTGRES_PORT, settings.POSTGRES_DB)
+    logger.info("  Timezone   : %s", settings.SCHEDULER_TIMEZONE)
+    logger.info("  Workers    : %s", settings.SCHEDULER_THREAD_POOL_SIZE)
+    logger.info("  API        : http://0.0.0.0:8000")
+    logger.info("  Docs       : http://0.0.0.0:8000/docs")
     logger.info("=" * 60)
 
-    # 8. Inicia — bloqueia até shutdown()
-    scheduler.start()
+    uvicorn.run(
+        "api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        log_level=settings.LOG_LEVEL.lower(),
+    )
 
 
 if __name__ == "__main__":

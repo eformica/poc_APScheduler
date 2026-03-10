@@ -30,18 +30,25 @@ poc_APScheduler/
     ├── .env / .env.example
     │
     ├── scheduler/                     # Núcleo do agendador
-    │   ├── app.py                     # Entrypoint: boot, retry DB, SIGTERM handler
+    │   ├── app.py                     # Entrypoint: boot, retry DB, uvicorn
     │   ├── config.py                  # Settings via pydantic-settings + .env
-    │   ├── engine.py                  # Fábrica do BlockingScheduler
-    │   └── registry.py                # Registro central de todos os jobs
+    │   ├── engine.py                  # Fábrica do BackgroundScheduler
+    │   └── registry.py                # TASK_CATALOG + registro central de todos os jobs
+    │
+    ├── api/                           # API REST (FastAPI + JWT)
+    │   ├── main.py                    # App FastAPI com lifespan
+    │   ├── auth.py                    # JWT: hash, create_token, decode
+    │   ├── dependencies.py            # get_db, get_scheduler, get_current_user
+    │   ├── schemas/                   # Pydantic models (auth, jobs, users)
+    │   └── routers/                   # Endpoints: /auth, /jobs, /users
     │
     ├── db/                            # Camada de dados
-    │   ├── models.py                  # ORM: JobExecutionLog, ContainerTaskLog
+    │   ├── models.py                  # ORM: JobExecutionLog, ContainerTaskLog, User
     │   ├── session.py                 # Engine + SessionLocal (thread-safe)
     │   └── init.sql                   # Esquema, índices e views analíticas
     │
     ├── listeners/
-    │   └── execution_logger.py        # make_logged_callable() + misfire listener
+    │   └── execution_logger.py        # make_logged_callable() + misfire + executed listener
     │
     ├── container_runner/              # Módulo de tasks containerizadas
     │   ├── channel.py                 # TaskChannel — usado DENTRO do container
@@ -97,12 +104,26 @@ cp .env.example .env       # ajuste credenciais se necessário
 docker-compose up --build
 ```
 
+### API REST
+
+O framework expõe uma API REST na porta `8000` com autenticação JWT. Ver [framework/README.md](framework/README.md#api-rest) para referência completa.
+
+```bash
+curl -s -X POST http://localhost:8000/auth/login \
+  -d 'username=admin&password=admin123' | jq .access_token
+```
+
 ### Dois tipos de jobs
 
 | Tipo | Onde roda | Persistência | Quando usar |
 |---|---|---|---|
 | **In-process** (`JobConfig`) | Thread pool do scheduler | `job_execution_logs` | Tarefas leves, rápidas, sem dependências extras |
 | **Containerizado** (`ContainerJobConfig`) | Container Docker isolado | `job_execution_logs` + `container_task_logs` | Tarefas pesadas, dependências próprias, isolamento total |
+
+> **Parâmetros disponíveis em ambos os tipos:**
+> - `trigger=None` → job sem agendamento automático; dispara somente via `POST /jobs/{id}/run`
+> - `in_catalog=False` → job oculto no `GET /jobs/catalog` (registrado, mas não listado)
+> - `job_kwargs={...}` → parâmetros passados à função em cada execução (in-process: `**kwargs`; container: `JOB_KWARGS` env var JSON)
 
 ---
 

@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     # ── Logging ─────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
 
+    # ── API / Segurança ──────────────────────────────────────────────────────
+    # Gere com: python -c "import secrets; print(secrets.token_hex(32))"
+    # Em produção, defina via variável de ambiente JWT_SECRET_KEY.
+    JWT_SECRET_KEY: str = "dev-insecure-key-change-in-production"
+
+    # Senha do usuário admin criado automaticamente no primeiro start.
+    # Altere via PUT /users/{id} após o primeiro login.
+    ADMIN_DEFAULT_PASSWORD: str = "admin123"
+
     # ── Propriedades computadas ─────────────────────────────────────────────
     @property
     def database_url(self) -> str:

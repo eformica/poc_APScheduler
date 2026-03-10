@@ -78,7 +78,10 @@ class TaskChannel:
         """
         Cria um TaskChannel lendo job_id da variável de ambiente JOB_ID.
 
-        O ContainerRunner injeta JOB_ID automaticamente ao lançar o container.
+        O ContainerRunner injeta automaticamente:
+          JOB_ID       → ID do job no APScheduler (obrigatório)
+          JOB_KWARGS   → JSON com os parâmetros do job (opcional; leia via .kwargs)
+
         Lança EnvironmentError se JOB_ID não estiver definida.
         """
         job_id = os.environ.get("JOB_ID", "").strip()
@@ -89,6 +92,32 @@ class TaskChannel:
                 "ou use ContainerRunner, que injeta automaticamente."
             )
         return cls(job_id=job_id)
+
+    @property
+    def kwargs(self) -> dict[str, Any]:
+        """
+        Parâmetros passados ao job via ``job_kwargs`` (JobConfig / ContainerJobConfig)
+        ou via ``job_kwargs`` no body de ``POST /jobs``.
+
+        O ContainerRunner serializa os parâmetros como JSON e os injeta na variável
+        de ambiente ``JOB_KWARGS``. Esta propriedade lê e parseia esse valor.
+
+        Retorna dict vazio se nenhum parâmetro foi definido.
+
+        Uso típico::
+
+            ch = TaskChannel.from_env()
+            params = ch.kwargs          # ex: {"order_id": 42, "retry": True}
+            order_id = params.get("order_id")
+        """
+        raw = os.environ.get("JOB_KWARGS", "").strip()
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
 
     # ── Emissão interna ────────────────────────────────────────────────────────
 
